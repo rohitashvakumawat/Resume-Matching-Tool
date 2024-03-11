@@ -9,8 +9,25 @@ import pandas as pd
 import re
 import matplotlib.pyplot as plt
 import seaborn as sns
+import spacy
+from PyPDF2 import PdfReader
+from io import BytesIO
+import re
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 nltk.download('punkt')
+
+
+nlp_model_path = "en_Resume_Matching_Keywords"
+nlp = spacy.load(nlp_model_path)
+
+float_regex = re.compile(r'^\d{1,2}(\.\d{1,2})?$')
+email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+float_digit_regex = re.compile(r'^\d+$')
+email_with_phone_regex = email_with_phone_regex = re.compile(
+    r'(\d{10}).|.(\d{10})')
 
 
 def extract_text_from_pdf(pdf_file):
@@ -21,11 +38,31 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 
-def extract_skills(text):
-    skills_keywords = ["python", "java", "machine learning",
-                       "data analysis", "communication", "problem solving"]
+def tokenize_text(text, nlp_model):
+    doc = nlp_model(text, disable=["tagger", "parser"])
+    tokens = [(token.text.lower(), token.label_) for token in doc.ents]
+    return tokens
+
+
+def extract_cgpa(resume_text):
+    # Define a regular expression pattern for CGPA extraction
+    cgpa_pattern = r'\b(?:CGPA|GPA|C\.G\.PA|Cumulative GPA)\s*:?[\s-]([0-9]+(?:\.[0-9]+)?)\b|\b([0-9]+(?:\.[0-9]+)?)\s(?:CGPA|GPA)\b'
+
+    # Search for CGPA pattern in the text
+    match = re.search(cgpa_pattern, resume_text, re.IGNORECASE)
+
+    # Check if a match is found
+    if match:
+        # Extract CGPA value
+        cgpa = match.group(1) if match.group(1) else match.group(2)
+        return float(cgpa)
+    else:
+        return None
+
+
+def extract_skills(text, skills_keywords):
     skills = [skill.lower()
-              for skill in skills_keywords if skill.lower() in text.lower()]
+              for skill in skills_keywords if re.search(r'\b' + re.escape(skill.lower()) + r'\b', text.lower())]
     return skills
 
 
@@ -33,14 +70,7 @@ def preprocess_text(text):
     return word_tokenize(text.lower())
 
 
-def extract_mobile_numbers(text):
-    mobile_pattern = r'\b\d{10}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b'
-    return re.findall(mobile_pattern, text)
 
-
-def extract_emails(text):
-    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    return re.findall(email_pattern, text)
 
 
 def train_doc2vec_model(documents):
@@ -63,26 +93,9 @@ def accuracy_calculation(true_positives, false_positives, false_negatives):
     return accuracy
 
 
-def extract_cgpa(resume_text):
-    # Define a regular expression pattern for CGPA extraction
-    cgpa_pattern = r'\b(?:CGPA|GPA|C.G.PA|Cumulative GPA)\s*:?[\s-]* ([0-9]+(?:\.[0-9]+)?)\b|\b([0-9]+(?:\.[0-9]+)?)\s*(?:CGPA|GPA)\b'
-
-    # Search for CGPA pattern in the text
-    match = re.search(cgpa_pattern, resume_text, re.IGNORECASE)
-
-    # Check if a match is found
-    if match:
-        cgpa = match.group(1)
-        if cgpa is not None:
-            return float(cgpa)
-        else:
-            return float(match.group(2))
-    else:
-        return None
 
 
-email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-phone_pattern = r'\b\d{10}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b'
+
 
 # Streamlit Frontend
 st.markdown("# Resume Matching Tool 📃📃")
@@ -100,170 +113,152 @@ if resumes_files:
         "Upload Job Description PDF", type=["pdf"])
 
     if job_descriptions_file:
-        # Sidebar - Sorting Options
-        sort_options = ['Weighted Score', 'Similarity Score']
-        selected_sort_option = st.sidebar.selectbox(
-            "Sort results by", sort_options)
-
+        
         # Backend Processing
         job_description_text = extract_text_from_pdf(job_descriptions_file)
         resumes_texts = [extract_text_from_pdf(
             resume_file) for resume_file in resumes_files]
+        job_description_text = extract_text_from_pdf(job_descriptions_file)
+        job_description_tokens = tokenize_text(job_description_text, nlp)
 
-        all_resumes_skills = [extract_skills(
-            resume_text) for resume_text in resumes_texts]
+        # st.subheader("Matching Keywords")
 
+        # Initialize counters
+        overall_skill_matches = 0
+        overall_qualification_matches = 0
+
+        # Create a list to store individual results
+        results_list = []
+        job_skills = set()
+        job_qualifications = set()
+
+        for job_token, job_label in job_description_tokens:
+            if job_label == 'QUALIFICATION':
+                job_qualifications.add(job_token)
+            elif job_label == 'SKILLS':
+                job_skills.add(job_token)
+
+        job_skills_number = len(job_skills)
+        job_qualifications_number = len(job_qualifications)
+
+        # Lists to store counts of matched skills for all resumes
+        skills_counts_all_resumes = []
+
+        # Iterate over all uploaded resumes
+        for uploaded_resume in resumes_files:
+            resume_text = extract_text_from_pdf(uploaded_resume)
+            resume_tokens = tokenize_text(resume_text, nlp)
+
+            # Initialize counters for individual resume
+            skillMatch = 0
+            qualificationMatch = 0
+            cgpa = ""
+
+            # Lists to store matched skills and qualifications for each resume
+            matched_skills = set()
+            matched_qualifications = set()
+            email = set()
+            phone = set()
+            name = set()
+
+            # Compare the tokens in the resume with the job description
+            for resume_token, resume_label in resume_tokens:
+                for job_token, job_label in job_description_tokens:
+                    if resume_token.lower() == job_token.lower():
+                        if resume_label == 'SKILLS':
+                            matched_skills.add(resume_token)
+                        elif resume_label == 'QUALIFICATION':
+                            matched_qualifications.add(resume_token)
+                    elif resume_label == 'CGPA' and bool(float_regex.match(resume_token)):
+                        cgpa = resume_token
+                    elif resume_label == 'PHONE' and bool(float_digit_regex.match(resume_token)):
+                        phone.add(resume_token)
+                    elif resume_label == 'QUALIFICATION':
+                        matched_qualifications.add(resume_token)
+
+            skillMatch = len(matched_skills)
+            qualificationMatch = len(matched_qualifications)
+
+            # Increment overall counters based on matches
+            overall_skill_matches += skillMatch
+            overall_qualification_matches += qualificationMatch
+
+            # Add count of matched skills for this resume to the list
+            skills_counts_all_resumes.append(
+                [resume_text.count(skill.lower()) for skill in job_skills])
+
+            # Create a dictionary for the current resume and append to the results list
+            result_dict = {
+                "Resume": uploaded_resume.name,
+                "Similarity Score": (skillMatch/job_skills_number)*100,
+                "Skill Matches": skillMatch,
+                "Matched Skills": matched_skills,
+                "CGPA": extract_cgpa(resume_text),
+                "Email": email,
+                "Phone": phone,
+                "Qualification Matches": qualificationMatch,
+                "Matched Qualifications": matched_qualifications
+            }
+
+            results_list.append(result_dict)
+
+        # Display overall matches
+        st.subheader("Overall Matches")
+        st.write(f"Total Skill Matches: {overall_skill_matches}")
+        st.write(
+            f"Total Qualification Matches: {overall_qualification_matches}")
+        st.write(f"Job Qualifications: {job_qualifications}")
+        st.write(f"Job Skills: {job_skills}")
+
+        # Display individual results in a table
+        results_df = pd.DataFrame(results_list)
+        st.subheader("Individual Results")
+        st.dataframe(results_df)
         tagged_resumes = [TaggedDocument(words=preprocess_text(
             text), tags=[str(i)]) for i, text in enumerate(resumes_texts)]
         model_resumes = train_doc2vec_model(tagged_resumes)
 
-        true_positives_mobile = 0
-        false_positives_mobile = 0
-        false_negatives_mobile = 0
 
-        true_positives_email = 0
-        false_positives_email = 0
-        false_negatives_email = 0
+        
+        st.subheader("\nHeatmap:")
+       
+        # Get skills keywords from user input
+        skills_keywords_input = st.text_input(
+            "Enter skills keywords separated by commas (e.g., python, java, machine learning):")
+        skills_keywords = [skill.strip()
+                           for skill in skills_keywords_input.split(',') if skill.strip()]
 
-        results_data = {'Resume': [], 'Similarity Score': [],
-                        'Weighted Score': [], 'Email': [], 'Contact': [], 'CGPA': []}
+        if skills_keywords:
+            # Calculate the similarity score between each skill keyword and the resume text
+            skills_similarity_scores = []
+            for resume_text in resumes_texts:
+                resume_text_similarity_scores = []
+                for skill in skills_keywords:
+                    similarity_score = calculate_similarity(
+                        model_resumes, resume_text, skill)
+                    resume_text_similarity_scores.append(similarity_score)
+                skills_similarity_scores.append(resume_text_similarity_scores)
 
-        for i, resume_text in enumerate(resumes_texts):
-            extracted_mobile_numbers = set(extract_mobile_numbers(resume_text))
-            extracted_emails = set(extract_emails(resume_text))
-            extracted_cgpa = extract_cgpa(resume_text)
+            # Create a DataFrame with the similarity scores and set the index to the names of the PDFs
+            skills_similarity_df = pd.DataFrame(
+                skills_similarity_scores, columns=skills_keywords, index=[resume_file.name for resume_file in resumes_files])
 
-            ground_truth_mobile_numbers = {'1234567890', '9876543210'}
-            ground_truth_emails = {
-                'john.doe@example.com', 'jane.smith@example.com'}
+            # Plot the heatmap
+            fig, ax = plt.subplots(figsize=(12, 8))
 
-            true_positives_mobile += len(
-                extracted_mobile_numbers.intersection(ground_truth_mobile_numbers))
-            false_positives_mobile += len(
-                extracted_mobile_numbers.difference(ground_truth_mobile_numbers))
-            false_negatives_mobile += len(
-                ground_truth_mobile_numbers.difference(extracted_mobile_numbers))
+            sns.heatmap(skills_similarity_df,
+                        cmap='YlGnBu', annot=True, fmt=".2f", ax=ax)
+            ax.set_title('Heatmap for Skills Similarity')
+            ax.set_xlabel('Skills')
+            ax.set_ylabel('Resumes')
 
-            true_positives_email += len(
-                extracted_emails.intersection(ground_truth_emails))
-            false_positives_email += len(
-                extracted_emails.difference(ground_truth_emails))
-            false_negatives_email += len(
-                ground_truth_emails.difference(extracted_emails))
+            # Rotate the y-axis labels for better readability
+            plt.yticks(rotation=0)
 
-            similarity_score = calculate_similarity(
-                model_resumes, resume_text, job_description_text)
-
-            other_criteria_score = 0
-
-            weighted_score = (0.6 * similarity_score) + \
-                (0.4 * other_criteria_score)
-
-            results_data['Resume'].append(resumes_files[i].name)
-            results_data['Similarity Score'].append(similarity_score * 100)
-            results_data['Weighted Score'].append(weighted_score)
-
-            emails = ', '.join(re.findall(email_pattern, resume_text))
-            contacts = ', '.join(re.findall(phone_pattern, resume_text))
-            results_data['Email'].append(emails)
-            results_data['Contact'].append(contacts)
-            results_data['CGPA'].append(extracted_cgpa)
-
-        results_df = pd.DataFrame(results_data)
-
-        if selected_sort_option == 'Similarity Score':
-            results_df = results_df.sort_values(
-                by='Similarity Score', ascending=False)
+            # Display the Matplotlib figure using st.pyplot()
+            st.pyplot(fig)
         else:
-            results_df = results_df.sort_values(
-                by='Weighted Score', ascending=False)
-
-        st.subheader(f"Results Table (Sorted by {selected_sort_option}):")
-
-        # Define a custom function to highlight maximum values in the specified columns
-        # Define a custom function to highlight maximum values in the specified columns
-        # Define a custom function to highlight maximum values in the specified columns
-        def highlight_max(data, color='grey'):
-            is_max = data == data.max()
-            return [f'background-color: {color}' if val else '' for val in is_max]
-
-
-
-        # Apply the custom highlighting function to the DataFrame
-        st.dataframe(results_df.style.apply(highlight_max, subset=[
-                     'Similarity Score', 'Weighted Score', 'CGPA']))
-
-
-        highest_score_index = results_df['Similarity Score'].idxmax()
-        highest_score_resume_name = resumes_files[highest_score_index].name
-
-        st.subheader("\nDetails of Highest Similarity Score Resume:")
-        st.write(f"Resume Name: {highest_score_resume_name}")
-        st.write(
-            f"Similarity Score: {results_df.loc[highest_score_index, 'Similarity Score']:.2f}")
-
-        if 'Weighted Score' in results_df.columns:
-            weighted_score_value = results_df.loc[highest_score_index,
-                                                  'Weighted Score']
-            st.write(f"Weighted Score: {weighted_score_value:.2f}" if pd.notnull(
-                weighted_score_value) else "Weighted Score: Not Mentioned")
-        else:
-            st.write("Weighted Score: Not Mentioned")
-
-        if 'Email' in results_df.columns:
-            email_value = results_df.loc[highest_score_index, 'Email']
-            st.write(f"Email: {email_value}" if pd.notnull(
-                email_value) else "Email: Not Mentioned")
-        else:
-            st.write("Email: Not Mentioned")
-
-        if 'Contact' in results_df.columns:
-            contact_value = results_df.loc[highest_score_index, 'Contact']
-            st.write(f"Contact: {contact_value}" if pd.notnull(
-                contact_value) else "Contact: Not Mentioned")
-        else:
-            st.write("Contact: Not Mentioned")
-
-        if 'CGPA' in results_df.columns:
-            cgpa_value = results_df.loc[highest_score_index, 'CGPA']
-            st.write(f"CGPA: {cgpa_value}" if pd.notnull(
-                cgpa_value) else "CGPA: Not Mentioned")
-        else:
-            st.write("CGPA: Not Mentioned")
-
-        mobile_accuracy = accuracy_calculation(
-            true_positives_mobile, false_positives_mobile, false_negatives_mobile)
-        email_accuracy = accuracy_calculation(
-            true_positives_email, false_positives_email, false_negatives_email)
-
-        st.subheader("\nAccuracy Calculation:")
-        st.write(f"Mobile Number Accuracy: {mobile_accuracy:.2%}")
-        st.write(f"Email Accuracy: {email_accuracy:.2%}")
-
-        skills_distribution_data = {'Resume': [], 'Skill': [], 'Frequency': []}
-        for i, resume_skills in enumerate(all_resumes_skills):
-            for skill in set(resume_skills):
-                skills_distribution_data['Resume'].append(
-                    resumes_files[i].name)
-                skills_distribution_data['Skill'].append(skill)
-                skills_distribution_data['Frequency'].append(
-                    resume_skills.count(skill))
-
-        skills_distribution_df = pd.DataFrame(skills_distribution_data)
-
-        skills_heatmap_df = skills_distribution_df.pivot(
-            index='Resume', columns='Skill', values='Frequency').fillna(0)
-
-        skills_heatmap_df_normalized = skills_heatmap_df.div(
-            skills_heatmap_df.sum(axis=1), axis=0)
-
-        fig, ax = plt.subplots(figsize=(12, 8))
-        sns.heatmap(skills_heatmap_df_normalized,
-                    cmap='YlGnBu', annot=True, fmt=".2f", ax=ax)
-        ax.set_title('Heatmap for Skills Distribution')
-        ax.set_xlabel('Resume')
-        ax.set_ylabel('Skill')
-        st.pyplot(fig)
+            st.write("Please enter at least one skill keyword.")
 
     else:
         st.warning("Please upload the Job Description PDF to proceed.")
